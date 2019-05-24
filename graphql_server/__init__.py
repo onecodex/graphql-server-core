@@ -12,8 +12,8 @@ import json
 from collections import namedtuple
 
 import six
-from graphql import get_default_backend
-from graphql.error import format_error as default_format_error
+from graphql import graphql_sync
+from graphql.error import format_error as default_format_error, GraphQLError
 from graphql.execution import ExecutionResult
 from graphql.type import GraphQLSchema
 
@@ -38,7 +38,6 @@ __all__ = [
     "encode_execution_results",
     "load_json_body",
     "json_encode",
-    "json_encode_pretty",
     "HttpQueryError",
     "RequestParams",
     "ServerResults",
@@ -172,22 +171,12 @@ def load_json_body(data):
     except Exception:
         raise HttpQueryError(400, "POST body sent invalid JSON.")
 
+def json_encode(data, pretty=False):
+    # type: (Dict, bool) -> str
+    if not pretty:
+        return json.dumps(data, separators=(",", ":"))
 
-def json_encode(data):
-    # type: (Union[Dict,List]) -> str
-    """Serialize the given data(a dictionary or a list) using JSON.
-
-    The given data (a dictionary or a list) will be serialized using JSON
-    and returned as a string that will be nicely formatted if you set pretty=True.
-    """
-    return json.dumps(data, separators=(",", ":"))
-
-
-def json_encode_pretty(data):
-    # type: (Union[Dict,List]) -> str
-    """Serialize the given data using JSON with nice formatting."""
     return json.dumps(data, indent=2, separators=(",", ": "))
-
 
 # Some more private helpers
 
@@ -250,15 +239,8 @@ def execute_graphql_request(
     if not params.query:
         raise HttpQueryError(400, "Must provide query string.")
 
-    try:
-        if not backend:
-            backend = get_default_backend()
-        document = backend.document_from_string(schema, params.query)
-    except Exception as e:
-        return ExecutionResult(errors=[e], invalid=True)
-
     if allow_only_query:
-        operation_type = document.get_operation_type(params.operation_name)
+        operation_type = params.operation_name
         if operation_type and operation_type != "query":
             raise HttpQueryError(
                 405,
@@ -269,11 +251,16 @@ def execute_graphql_request(
             )
 
     try:
-        return document.execute(
-            operation_name=params.operation_name, variables=params.variables, **kwargs
+        return graphql_sync(
+            schema,
+            params.query,
+            operation_name=params.operation_name,
+            variable_values=params.variables,
+            context_value=kwargs.get("context"),
+            middleware=kwargs.get("middleware"),
         )
     except Exception as e:
-        return ExecutionResult(errors=[e], invalid=True)
+        return ExecutionResult(errors=[e])
 
 
 def get_response(
@@ -313,9 +300,19 @@ def format_execution_result(
     status_code = 200
 
     if execution_result:
-        if execution_result.invalid:
+        response = {}
+        if execution_result.errors:
+            response["errors"] = []
+
+            for e in execution_result.errors:
+                try:
+                    response["errors"].append(default_format_error(e))
+                except Exception:
+                    response["errors"].append(str(e))
+
             status_code = 400
-        response = execution_result.to_dict(format_error=format_error)
+        if execution_result.data:
+            response["data"] = execution_result.data
     else:
         response = None
 
